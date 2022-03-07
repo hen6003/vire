@@ -10,13 +10,22 @@ pub struct TextBuf {
 }
 
 impl TextBuf {
+    pub fn empty() -> Self {
+        Self {
+            cursor: (0,0),
+            file: None,
+            changed: true,
+            data: vec![String::new()],
+        }
+    }
+
     pub fn from_file(path: &str) -> Self {
         let mut file = File::open(path).unwrap();
         let mut data = "".to_string();
 
         file.read_to_string(&mut data).unwrap();
 
-        let mut data: Vec<String> = data.split("\n").map(|x| {x.to_string()}).collect();
+        let mut data: Vec<String> = data.split('\n').map(|x| {x.to_string()}).collect();
         data.pop();
     
         Self {
@@ -56,8 +65,8 @@ impl TextBuf {
             let split = self.data[self.cursor.1].chars().collect::<Vec<char>>();
             let split = split.split_at(self.cursor.0);
             // Convert Vec<char> back into String
-            let split = (split.0.into_iter().collect::<String>(), 
-                         split.1.into_iter().collect::<String>());
+            let split = (split.0.iter().collect::<String>(), 
+                         split.1.iter().collect::<String>());
 
             self.data[self.cursor.1] = split.0;
             self.cursor = (0, self.cursor.1 + 1);

@@ -17,10 +17,11 @@ pub struct Editor<'a> {
     command: String,
     state: State,
 
-    text_buf: TextBuf,
+    text_bufs: Vec<TextBuf>,
+    cur_text_buf: usize,
 
-    command_map: HashMap<String, fn(&mut Editor, Option<String>)>,
-    keybind_map: HashMap<event::Key, fn(&mut Editor, Option<String>)>,
+    command_map: HashMap<String, fn(&mut Editor, Option<String>) -> Option<String>>,
+    keybind_map: HashMap<event::Key, fn(&mut Editor, Option<String>) -> Option<String>>,
 
     events: Box<dyn Iterator<Item=Result<event::Event, std::io::Error>> + 'a>,
     screen: Box<dyn Write + 'a>,
@@ -28,7 +29,7 @@ pub struct Editor<'a> {
 
 impl<'a> Editor<'a> {
     /// Init functions
-    pub fn new() -> Self {
+    pub fn new(path: Option<String>) -> Self {
         use std::io::{stdin, stdout};
         use termion::input::TermRead;
         use termion::raw::IntoRawMode;
@@ -37,14 +38,20 @@ impl<'a> Editor<'a> {
         let screen = screen::AlternateScreen::from(stdout);
         let events = stdin().events();
 
-        let text_buf = TextBuf::from_file("test.txt");
+        let text_bufs = vec![
+            match path {
+                Some(p) => TextBuf::from_file(&p),
+                None => TextBuf::empty(),
+            }
+        ];
 
         Self {
             running: true,
             needs_redraw: true,
             state: State::Normal,
             command: String::new(),
-            text_buf,
+            text_bufs,
+            cur_text_buf: 0,
             command_map: HashMap::new(),
             keybind_map: HashMap::new(),
             events: Box::new(events),
@@ -78,20 +85,20 @@ impl<'a> Editor<'a> {
         self
     }
 
-    pub fn add_command(&mut self, command: &str, f: fn(&mut Editor, Option<String>)) -> &mut Self {
+    pub fn add_command(&mut self, command: &str, f: fn(&mut Editor, Option<String>) -> Option<String>) -> &mut Self {
         self.command_map.insert(command.to_string(), f);
 
         self
     }
     
-    pub fn add_keybind(&mut self, key: event::Key, f: fn(&mut Editor, Option<String>)) -> &mut Self {
+    pub fn add_keybind(&mut self, key: event::Key, f: fn(&mut Editor, Option<String>) -> Option<String>) -> &mut Self {
         self.keybind_map.insert(key, f);
 
         self
     }
 
     ///====
-    fn call_command(&mut self) -> Result<(), ()> { 
+    fn call_command(&mut self) -> Result<Option<String>, ()> { 
         let (command, arg) = {
             let command: Vec<&str> = self.command.splitn(2, ' ').collect();
 
@@ -104,10 +111,7 @@ impl<'a> Editor<'a> {
         };
 
         let ret = match self.command_map.get(&command) {
-            Some(func) => {
-                func(self, arg);
-                Ok(())
-            },
+            Some(func) => Ok(func(self, arg)),
             None => Err(()),
         };
 
@@ -122,7 +126,9 @@ impl<'a> Editor<'a> {
 
             event::Event::Key(key) => {
                 if let Some(command) = self.keybind_map.get(&key) {
-                    command(self, None);
+                    if let Some(s) = command(self, None) {
+                        self.print_bottom(&s).unwrap();
+                    }
                 }
             },
 
@@ -142,16 +148,19 @@ impl<'a> Editor<'a> {
                         Key::Char('\n') => {
                             self.state = State::Normal;
 
-                            if self.call_command() == Err(()) {
-                                self.print_bottom("Unknown command")
-                            } else {
-                                self.print_bottom("")
+                            match self.call_command() {
+                                Ok(s) => if let Some(s) = s {
+                                    self.print_bottom(&s)
+                                } else {
+                                    Ok(())
+                                },
+                                Err(()) => self.print_bottom("Unknown command"),
                             }.unwrap();
                         },
 
                         // Don't go back when no characters have been removed 
                         Key::Backspace => if self.command.pop().is_some() {
-	   		                    write!(self.screen, "{}{}", cursor::Left(1), clear::UntilNewline).unwrap();
+	   		                write!(self.screen, "{}{}", cursor::Left(1), clear::UntilNewline).unwrap();
                         },
 
                         // Append to command
@@ -176,10 +185,10 @@ impl<'a> Editor<'a> {
 
             State::Insert => {
                 if let event::Event::Key(Key::Char(key)) = event {
-                    self.text_buf.insert(key);
+                    self.cur_text_buf().insert(key);
                     self.needs_redraw = true;
                 } else if event == event::Event::Key(Key::Backspace) {
-                    self.text_buf.backspace();
+                    self.cur_text_buf().backspace();
                     self.needs_redraw = true;
                 } else {
                     self.run_keybind(event);
@@ -200,7 +209,7 @@ impl<'a> Editor<'a> {
         // Goto top left
         write!(self.screen, "{}", cursor::Goto(1,1)).unwrap();
 
-        let data = self.text_buf.data();
+        let data = self.text_bufs[self.cur_text_buf].data();
 
         for y in 0..term_size.1 {
             let text = if let Some(row) = data.get(y as usize) {
@@ -238,12 +247,12 @@ impl<'a> Editor<'a> {
     fn reset_cursor(&mut self) {
         let cursor_pos = match self.state {
             State::Normal => {
-                let pos = self.text_buf.cursor();
+                let pos = self.cur_text_buf().cursor();
                 (pos.0 as u16 + 1, pos.1 as u16 + 1)
             },
 
             State::Insert => {
-                let pos = self.text_buf.cursor();
+                let pos = self.cur_text_buf().cursor();
                 (pos.0 as u16 + 1, pos.1 as u16 + 1)
             },
 
@@ -261,7 +270,7 @@ impl<'a> Editor<'a> {
 
     // Utility
     fn cur_text_buf(&mut self) -> &mut TextBuf {
-        &mut self.text_buf
+        &mut self.text_bufs[self.cur_text_buf]
     }
 
     pub fn stop(&mut self) {
@@ -284,49 +293,67 @@ impl<'a> Editor<'a> {
     pub fn clear(&mut self) {
         write!(self.screen, "{}", clear::All).unwrap();
     }
+
+    pub fn new_text_buf(&mut self, path: Option<String>) {
+        self.text_bufs.push(
+            match path {
+                Some(p) => TextBuf::from_file(&p),
+                None => TextBuf::empty(),
+            }
+        );
+    }
 }
 
 // Default environment functions
-fn quit(editor: &mut Editor, _: Option<String>) {
+fn quit(editor: &mut Editor, _: Option<String>) -> Option<String> {
     editor.stop();
+    None
 }
 
-fn write(editor: &mut Editor, path: Option<String>) {
-    editor.cur_text_buf().write(path).unwrap()
+fn write(editor: &mut Editor, path: Option<String>) -> Option<String> {
+    Some(match editor.cur_text_buf().write(path) {
+        Ok(_) => "File written".to_string(),
+        Err(e) => format!("Failed to write file: {}", e),
+    })
 }
 
-fn writequit(editor: &mut Editor, _: Option<String>) {
+fn writequit(editor: &mut Editor, _: Option<String>) -> Option<String> {
     quit(editor, None);
     write(editor, None);
+    None
 }
 
-fn command_mode(editor: &mut Editor, _: Option<String>) {
+fn command_mode(editor: &mut Editor, _: Option<String>) -> Option<String> {
     editor.set_state(State::Command);
-    editor.print_bottom(":").unwrap();
+    Some(":".to_string())
 }
 
-fn normal_mode(editor: &mut Editor, _: Option<String>) {
+fn normal_mode(editor: &mut Editor, _: Option<String>) -> Option<String> {
     editor.set_state(State::Normal);
-    editor.print_bottom("--NORMAL--").unwrap();
+    Some("--NORMAL--".to_string())
 }
 
-fn insert_mode(editor: &mut Editor, _: Option<String>) {
+fn insert_mode(editor: &mut Editor, _: Option<String>) -> Option<String> {
     editor.set_state(State::Insert);
-    editor.print_bottom("--INSERT--").unwrap();
+    Some("--INSERT--".to_string())
 }
 
-fn left(editor: &mut Editor, _: Option<String>) {
-    editor.cur_text_buf().left()
+fn left(editor: &mut Editor, _: Option<String>) -> Option<String> {
+    editor.cur_text_buf().left();
+    None
 }
 
-fn right(editor: &mut Editor, _: Option<String>) {
-    editor.cur_text_buf().right()
+fn right(editor: &mut Editor, _: Option<String>) -> Option<String> {
+    editor.cur_text_buf().right();
+    None
 }
 
-fn up(editor: &mut Editor, _: Option<String>) {
-    editor.cur_text_buf().up()
+fn up(editor: &mut Editor, _: Option<String>) -> Option<String> {
+    editor.cur_text_buf().up();
+    None
 }
 
-fn down(editor: &mut Editor, _: Option<String>) {
-    editor.cur_text_buf().down()
+fn down(editor: &mut Editor, _: Option<String>) -> Option<String> {
+    editor.cur_text_buf().down();
+    None
 }
