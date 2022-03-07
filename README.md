@@ -7,3 +7,6 @@ Vi Inspired Rust Editor
 ** Command mode (':')
 ** Insert mode
 ** Normal mode
+
+## Screenshot
+![vire editing its source](screenshot.png)
