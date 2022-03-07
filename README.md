@@ -4,9 +4,9 @@ Vi Inspired Rust Editor
 ## Current features
 * hjkl + arrow keys for moving the cursor
 * Modes
-** Command mode (':')
-** Insert mode
-** Normal mode
+  * Command mode (':')
+  * Insert mode
+  * Normal mode
 
 ## Screenshot
 ![vire editing its source](screenshot.png)
