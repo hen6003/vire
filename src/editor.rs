@@ -17,7 +17,7 @@ pub struct Editor<'a> {
     command: String,
     state: State,
 
-    text_bufs: Vec<TextBuf>,
+    text_bufs: Vec<(TextBuf, usize)>,
     cur_text_buf: usize,
 
     command_map: HashMap<String, fn(&mut Editor, Option<String>) -> Option<String>>,
@@ -39,10 +39,10 @@ impl<'a> Editor<'a> {
         let events = stdin().events();
 
         let text_bufs = vec![
-            match path {
+            (match path {
                 Some(p) => TextBuf::from_file(&p),
                 None => TextBuf::empty(),
-            }
+            }, 0)
         ];
 
         Self {
@@ -208,11 +208,12 @@ impl<'a> Editor<'a> {
 
         // Goto top left
         write!(self.screen, "{}", cursor::Goto(1,1)).unwrap();
-
-        let data = self.text_bufs[self.cur_text_buf].data();
+        
+        let (text_buf, offset) = &self.text_bufs[self.cur_text_buf];
+        let data = text_buf.data();
 
         for y in 0..term_size.1 {
-            let text = if let Some(row) = data.get(y as usize) {
+            let text = if let Some(row) = data.get(y as usize + offset) {
                 row
             } else {
                 "~"
@@ -226,6 +227,18 @@ impl<'a> Editor<'a> {
 
     pub fn start_loop(&mut self) { 
         while self.running {  
+            // Scroll
+            let (text_buf, offset) = &mut self.text_bufs[self.cur_text_buf];
+            let term_size = terminal_size().unwrap();
+
+            if text_buf.cursor().1 as isize - *offset as isize > term_size.1 as isize - 2 {
+                self.text_bufs[self.cur_text_buf].1 += 1;
+                self.needs_redraw = true;
+            } else if (text_buf.cursor().1 as isize - *offset as isize) < 0 {
+                self.text_bufs[self.cur_text_buf].1 -= 1;
+                self.needs_redraw = true;
+            }
+
             if self.needs_redraw {
                 // Clear screen
                 self.clear();
@@ -238,26 +251,30 @@ impl<'a> Editor<'a> {
 
                 self.needs_redraw = false;
             }
-            
+
+            // Check events
 	        let event = self.events.next().unwrap().unwrap();
             self.parse_event(event); 
         }
     }
     
     fn reset_cursor(&mut self) {
+        let size = terminal_size().unwrap();
+
         let cursor_pos = match self.state {
             State::Normal => {
-                let pos = self.cur_text_buf().cursor();
-                (pos.0 as u16 + 1, pos.1 as u16 + 1)
+                let text_buf = &self.text_bufs[self.cur_text_buf];
+                let pos = text_buf.0.cursor();
+                (pos.0 as u16 + 1, (pos.1 + 1 - text_buf.1) as u16)
             },
 
             State::Insert => {
-                let pos = self.cur_text_buf().cursor();
-                (pos.0 as u16 + 1, pos.1 as u16 + 1)
+                let text_buf = &self.text_bufs[self.cur_text_buf];
+                let pos = text_buf.0.cursor();
+                (pos.0 as u16 + 1, (pos.1 + 1 - text_buf.1) as u16)
             },
 
             State::Command => {
-                let size = terminal_size().unwrap();
                 let command_len = self.command.len();
 
                 (command_len as u16 + 2, size.1)
@@ -267,10 +284,9 @@ impl<'a> Editor<'a> {
         write!(self.screen, "{}", cursor::Goto(cursor_pos.0 as u16, cursor_pos.1 as u16)).unwrap();
     }
 
-
     // Utility
     fn cur_text_buf(&mut self) -> &mut TextBuf {
-        &mut self.text_bufs[self.cur_text_buf]
+        &mut self.text_bufs[self.cur_text_buf].0
     }
 
     pub fn stop(&mut self) {
@@ -296,10 +312,10 @@ impl<'a> Editor<'a> {
 
     pub fn new_text_buf(&mut self, path: Option<String>) {
         self.text_bufs.push(
-            match path {
+            (match path {
                 Some(p) => TextBuf::from_file(&p),
                 None => TextBuf::empty(),
-            }
+            }, 0)
         );
     }
 }
